@@ -1,8 +1,9 @@
 """Provenance Guard — Flask application.
 
-M3 scope: the submission endpoint and the first detection signal (LLM-based
-classification). Later milestones add the stylometric signal, confidence
-scoring, transparency labels, the audit log, and the appeal endpoint.
+Current scope: the submission endpoint runs both detection signals (LLM-based
+classification + stylometric heuristics), combines them with the confidence
+scoring engine, and writes a structured audit entry per call. Still to come:
+the transparency-label generator and the appeal endpoint (M5).
 """
 
 import uuid
@@ -11,21 +12,12 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 from audit_log import get_log, write_entry
-from signals import analyze_llm_signal
+from scoring import combine_scores
+from signals import analyze_llm_signal, analyze_stylometric_signal
 
 load_dotenv()
 
 app = Flask(__name__)
-
-
-def interim_attribution(ai_score):
-    """Provisional attribution based on signal 1 alone.
-
-    This is a simple lean, NOT the final decision logic. Milestone 4 replaces
-    it with the real engine (high_confidence_ai / high_confidence_human /
-    uncertain) once the stylometric signal and combined scoring exist.
-    """
-    return "likely_ai" if ai_score >= 0.5 else "likely_human"
 
 
 @app.get("/health")
@@ -36,12 +28,12 @@ def health():
 
 @app.post("/submit")
 def submit():
-    """Accept raw text, run the first detection signal, and return a result.
+    """Accept raw text, run both detection signals, and return a scored result.
 
-    The first signal (LLM-based classification) is wired in and every call
-    writes a structured entry to the audit log. The ``attribution`` and
-    ``confidence`` values here are interim (derived from signal 1 alone); the
-    real scoring engine and transparency label arrive in M4/M5.
+    Both signals (LLM classification + stylometric heuristics) run, the scoring
+    engine combines them per planning.md, and every call writes a structured
+    audit entry recording both individual signal scores and the combined
+    result. The transparency ``label`` is still a placeholder until M5.
 
     Request body (JSON):
         {"text": "<the writing to analyze>", "creator_id": "<id>"}
@@ -51,11 +43,14 @@ def submit():
             "content_id": "content_...",  # unique; used by the appeal endpoint
             "creator_id": "<id>",
             "status": "classified",
-            "attribution": "likely_ai" | "likely_human",  # interim
-            "confidence": 0.0-1.0,        # interim, from signal 1 only
+            "attribution": "high_confidence_ai" | "high_confidence_human"
+                           | "uncertain",
+            "confidence": 0.0-1.0,
+            "final_ai_score": 0.0-1.0,
             "llm_score": 0.0-1.0,
+            "stylometric_score": 0.0-1.0,
             "label": "...",               # placeholder until M5 labels
-            "signals": {"llm": { ...full signal 1 output... }}
+            "signals": {"llm": {...}, "stylometric": {...}}
         }
     """
     data = request.get_json(silent=True)
@@ -73,21 +68,24 @@ def submit():
     # Unique ID for this submission — the appeal endpoint and audit log key on it.
     content_id = f"content_{uuid.uuid4().hex[:12]}"
 
+    # Run both detection signals and combine them per the scoring spec.
     llm_result = analyze_llm_signal(text)
+    stylometric_result = analyze_stylometric_signal(text)
     llm_score = llm_result["aiScore"]
+    stylometric_score = stylometric_result["aiScore"]
 
-    # Interim attribution/confidence from signal 1 only (M4 replaces this).
-    attribution = interim_attribution(llm_score)
-    confidence = round(max(llm_score, 1 - llm_score), 2)
+    score = combine_scores(llm_score, stylometric_score)
 
-    # Structured audit entry — timestamp is added by write_entry().
+    # Structured audit entry — records both signal scores + the combined result.
     write_entry(
         {
             "content_id": content_id,
             "creator_id": creator_id,
-            "attribution": attribution,
-            "confidence": confidence,
+            "attribution": score["result"],
+            "confidence": score["confidence"],
+            "final_ai_score": score["finalAiScore"],
             "llm_score": llm_score,
+            "stylometric_score": stylometric_score,
             "status": "classified",
         }
     )
@@ -97,12 +95,14 @@ def submit():
             "content_id": content_id,
             "creator_id": creator_id,
             "status": "classified",
-            "attribution": attribution,
-            "confidence": confidence,
+            "attribution": score["result"],
+            "confidence": score["confidence"],
+            "final_ai_score": score["finalAiScore"],
             "llm_score": llm_score,
+            "stylometric_score": stylometric_score,
             # Placeholder until the transparency-label generator lands (M5).
-            "label": "Attribution interim — final label generated in M5.",
-            "signals": {"llm": llm_result},
+            "label": "Attribution complete — reader-facing label generated in M5.",
+            "signals": {"llm": llm_result, "stylometric": stylometric_result},
         }
     )
 
