@@ -437,3 +437,7 @@ signals/
   stylometric_signal.py      Signal 2: stylometric heuristics
 data/audit_log.jsonl         Runtime audit log (generated)
 ```
+
+## Demo Video
+
+[Demo Link](https://www.loom.com/share/7293b46ed9f5430d927d13e0b9872d7e)
